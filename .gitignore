@@ -89,3 +89,7 @@ Temporary Items
 .history
 
 # End of https://www.gitignore.io/api/macos,kicad,platformio,visualstudiocode
+
+#don't store the config file with apsswords
+config.yaml
+output.ofx
