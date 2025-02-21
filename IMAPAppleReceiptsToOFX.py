@@ -95,51 +95,44 @@ def process_email(mail, email_id):
                 html_content = msg.get_payload(decode=True).decode(msg.get_content_charset() or 'utf-8')
 
         if html_content:
-            apple_id = ''
+            receipt_apple_id = ''
+            receipt_order_id = ''
             receipt_items = OrderedDict()
             receipt_subtotal = Money(0, USD)
             receipt_tax = Money(0, USD)
             receipt_total = Money(0, USD)
-            receipt_id = ''
 
             logging.info("HTML content extracted from email")
             soup = BeautifulSoup(html_content, 'html.parser')
 
             desktop_div = soup.find('div', class_='aapl-desktop-div')
             if desktop_div:
-                try:
-                    account_label_node = desktop_div.find(string=lambda text: re.search(r"APPLE\s(ACCOUNT|ID)", text))
-                    if account_label_node:
-                        account_node = account_label_node.find_parent('td')
-                        potential_apple_id = account_node.find_all(string=True)[-1].get_text(strip=True).split()[-1]
-                        if '@' in potential_apple_id:
-                            if any(c.isspace() for c in potential_apple_id):
-                                logging.error(f'Parsed Apple ID contains whitespace: {potential_apple_id}')
+
+                # Extract Apple ID and Order ID
+                def extract_id(label, regex):
+                    try:
+                        label_node = desktop_div.find(string=lambda text: re.search(regex, text))
+                        if label_node:
+                            node = label_node.find_parent('td')
+                            potential_id = node.find_all(string=True)[-1].get_text(strip=True).split()[-1]
+                            if potential_id:
+                                if any(c.isspace() for c in potential_id):
+                                    logging.error(f'Parsed {label} contains whitespace: {potential_id}')
+                                else:
+                                    return potential_id.strip()
                             else:
-                                apple_id = potential_apple_id.strip()
-                        else:
-                            logging.error(f'Parsed Apple ID does not contain "@": {potential_apple_id}')
-                except (ValueError, AttributeError) as e:
-                    logging.error(f'Error parsing Apple ID {e}')
+                                logging.error(f'Parsed {label} is empty: {potential_id}')
+                    except (ValueError, AttributeError) as e:
+                        logging.error(f'Error parsing {label}: {e}')
+                    return ''
 
-                try:
-                    order_label_node = desktop_div.find(string=lambda text: re.search(r"ORDER\sID", text))
-                    if order_label_node:
-                        order_node = order_label_node.find_parent('td')
-                        potential_order_id = order_node.find_all(string=True)[-1].get_text(strip=True).split()[-1]
-                        if potential_order_id:
-                            if any(c.isspace() for c in potential_order_id):
-                                logging.error(f'Parsed Order ID contains whitespace: {potential_order_id}')
-                            else:
-                                order_id = potential_order_id.strip()
-                        else:
-                            logging.error(f'Parsed Order ID is empty: {potential_order_id}')
-                except (ValueError, AttributeError) as e:
-                    logging.error(f'Error parsing Order ID: {e}')
+                receipt_apple_id = extract_id('Apple ID', r"APPLE\s(ACCOUNT|ID)")
+                receipt_order_id = extract_id('Order ID', r"ORDER\sID")
 
-                logging.info(f'Apple ID: {apple_id}')
-                logging.info(f'Order ID: {order_id}')
+                logging.info(f'Apple ID: {receipt_apple_id}')
+                logging.info(f'Order ID: {receipt_order_id}')
 
+                # Extract all the receipt items
                 for item_link in desktop_div.find_all('a', class_='item-links'):
                     cell = item_link.find_parent('td')
                     if cell:
@@ -159,11 +152,12 @@ def process_email(mail, email_id):
                             if title == "Premier (Automatic Renewal)":
                                 title = "Apple One Premier"
 
-
                             row = cell.find_parent('tr')
                             if(row):
                                 price = Money(row.find_all('td')[-1].get_text(strip=True).replace('$', ''), USD)
 
+                                # Handle loads of money to the account
+                                # Apple does not represent these as negative in the email
                                 if title.startswith("Money added to"):
                                     price = -price
 
@@ -171,6 +165,7 @@ def process_email(mail, email_id):
 
                             receipt_items[title] = item_details
 
+                # Extract subtotal, tax, and total
                 def extract_amount_from_div(div, label):
                     try:
                         cell = div.find('td', string=lambda text: text and label.lower() == text.strip().lower())
@@ -181,22 +176,23 @@ def process_email(mail, email_id):
                         logging.error(f'Error parsing {label}: {e}')
                     return Money(0, USD)
 
-                # Extract subtotal, receipt_total, and receipt_tax amounts
                 receipt_subtotal = extract_amount_from_div(desktop_div, 'Subtotal')
-                receipt_total = extract_amount_from_div(desktop_div, 'Total')
                 receipt_tax = extract_amount_from_div(desktop_div, 'Tax')
+                receipt_total = extract_amount_from_div(desktop_div, 'Total')
 
+                # If there's no tax, Apple doesn't specify a subtotal
                 if receipt_tax == Money(0, USD) and receipt_subtotal == Money(0, USD):
                     receipt_subtotal = receipt_total
 
                 # Validate receipt items and totals
                 calculated_subtotal = sum(item['price'] for item in receipt_items.values())
-                calculated_total = calculated_subtotal + receipt_tax
-
                 if calculated_subtotal != receipt_subtotal:
                     logging.error(f'Subtotal mismatch: calculated {calculated_subtotal}, expected {receipt_subtotal}')
+
+                calculated_total = calculated_subtotal + receipt_tax
                 if calculated_total != receipt_total:
                     logging.error(f'Total mismatch: calculated {calculated_total}, expected {receipt_total}')
+
             else:
                 logging.info("No HTML content found in email")
         else:
@@ -211,10 +207,10 @@ def process_email(mail, email_id):
         else:
             logging.info('No items found in receipt')
 
-        if (receipt_items and receipt_total):
+        if receipt_order_id and receipt_apple_id and receipt_items and receipt_total and receipt_date and recipient_email:
             return {
-                'order_id': order_id,
-                'apple_id': apple_id,
+                'receipt_order_id': receipt_order_id,
+                'receipt_apple_id': receipt_apple_id,
                 'receipt_items': receipt_items,
                 'subtotal': receipt_subtotal,
                 'receipt_tax': receipt_tax,
@@ -223,6 +219,7 @@ def process_email(mail, email_id):
                 'recipient_email': recipient_email
             }
         else:
+            logging.error(f'Incomplete receipt data, skipping email {email_id}')
             return None
 
     except Exception as e:
@@ -288,41 +285,43 @@ def generate_ofx_output(receipt_data, account_id, output_file):
 
     for receipt in receipt_data:
         receipt_items = receipt['receipt_items']
-        receipt_subtotal = receipt['subtotal']
         receipt_tax = receipt['receipt_tax']
         receipt_total = receipt['receipt_total']
         receipt_date = receipt['date']
-        order_id = receipt['order_id']
-        order_apple_id = receipt['apple_id']
+        receipt_order_id = receipt['receipt_order_id']
+        order_apple_id = receipt['receipt_apple_id']
 
         if not receipt_items:
-            logging.warning(f'No receipt items found for order ID {order_id}')
+            logging.warning(f'No receipt items found for order ID {receipt_order_id}')
             continue
 
+        # Don't want a seperate 'tax' item, so we'll distribute the tax across all items
         tax_percentage = receipt_tax / receipt_total
 
-        item_amounts = []
+        transaction_items = []
         for title, item in receipt_items.items():
             item_price = item['price']
             item_tax = (item_price * tax_percentage).round(2)
             amount = item_price + item_tax
-            item_amounts.append((title, item, amount))
+            transaction_items.append((title, item, amount))
 
         # Adjust for rounding differences
-        total_calculated = sum(amount for _, _, amount in item_amounts)
+        total_calculated = sum(amount for _, _, amount in transaction_items)
         rounding_difference = (receipt_total - total_calculated).round(2)
-        if item_amounts:
-            last_item = item_amounts[-1]
-            item_amounts[-1] = (last_item[0], last_item[1], last_item[2] + rounding_difference)
+        if rounding_difference != 0:
+            last_item = transaction_items[-1]
+            transaction_items[-1] = (last_item[0], last_item[1], last_item[2] + rounding_difference)
 
         # Verify that all item amounts add up to the total
-        total_calculated = sum(amount for _, _, amount in item_amounts)
+        total_calculated = sum(amount for _, _, amount in transaction_items)
         if total_calculated != receipt_total:
             logging.error(f'Total mismatch for receipt on {receipt_date}: calculated {total_calculated}, expected {receipt_total}')
             continue
 
         memo = ''
         if order_apple_id != account_id:
+            # With Family Sharing, the Apple ID for the order may not be the
+            # same as the Apple ID for the account
             memo += f'Apple ID: {order_apple_id}'
         if item.get('duration'):
             if memo:
@@ -330,21 +329,21 @@ def generate_ofx_output(receipt_data, account_id, output_file):
             memo += f'Subscription: {item["duration"]}'
 
         item_counter = 1
-        for title, item, amount in item_amounts:
+        for title, item, amount in transaction_items:
             transaction = transaction_template.format(
                 type='CREDIT' if amount < Money(0, USD) else 'DEBIT',
                 date=receipt_date.strftime("%Y%m%d"),
                 amount=f"{-amount}",
-                fitid=f"{order_id}-{item_counter}",
+                fitid=f"{receipt_order_id}-{item_counter}",
                 title=title,
                 memo=memo
             )
             transactions.append(transaction)
             item_counter += 1
 
+        total_items += item_counter - 1
         total_receipts += 1
-        total_items += len(item_amounts)
-        logging.info(f'Processed {len(item_amounts)} items for order ID {order_id}')
+        logging.info(f'Processed {len(transaction_items)} items for order ID {receipt_order_id}')
 
     most_recent_date = max(receipt['date'] for receipt in receipt_data).strftime("%Y%m%d%H%M%S")
     ofx_output = ofx_data.format(
@@ -370,7 +369,7 @@ def main():
     with open(args.config, 'r') as config_file:
         config = yaml.safe_load(config_file)
 
-    print(config)
+    logging.info(f'config: {config}')
 
     imap_server = config['IMAP']['server']
     email_account = config['IMAP']['email']
@@ -390,13 +389,13 @@ def main():
     if mail:
         all_receipt_data = []
         email_ids = fetch_emails(mail, folder=folder, days=args.days)
-        recipient_emails = []
+        recipient_email_counter = Counter()
 
         for email_id in email_ids:
             receipt_data = process_email(mail, email_id)
             if receipt_data:
                 all_receipt_data.append(receipt_data)
-                recipient_emails.append(receipt_data['recipient_email'])
+                recipient_email_counter[receipt_data['recipient_email']] += 1
 
         mail.logout()
 
@@ -404,8 +403,8 @@ def main():
         total_items = sum(len(receipt['receipt_items']) for receipt in all_receipt_data)
         logging.info(f'Total number of items: {total_items}')
 
-        if recipient_emails:
-            most_common_email = Counter(recipient_emails).most_common(1)[0][0]
+        if recipient_email_counter:
+            most_common_email = recipient_email_counter.most_common(1)[0][0]
             logging.info(f'Most common recipient email: {most_common_email}')
             generate_ofx_output(all_receipt_data, most_common_email, args.output)
         else:
