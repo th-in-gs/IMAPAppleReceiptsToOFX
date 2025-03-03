@@ -105,8 +105,10 @@ def process_email(mail, email_id):
             logging.info("HTML content extracted from email")
             soup = BeautifulSoup(html_content, 'html.parser')
 
+            # Pre March 2024 format
             desktop_div = soup.find('div', class_='aapl-desktop-div')
             if desktop_div:
+                logging.info("Processing pre-march 2024 format email")
 
                 # Extract Apple ID and Order ID
                 def extract_id(label, regex):
@@ -180,21 +182,92 @@ def process_email(mail, email_id):
                 receipt_tax = extract_amount_from_div(desktop_div, 'Tax')
                 receipt_total = extract_amount_from_div(desktop_div, 'Total')
 
-                # If there's no tax, Apple doesn't specify a subtotal
-                if receipt_tax == Money(0, USD) and receipt_subtotal == Money(0, USD):
-                    receipt_subtotal = receipt_total
+            # Post March 2024 format
+            email_container_div = soup.find('div', id='email_container')
+            if email_container_div:
+                logging.info("Processing march 2024+ format email")
 
-                # Validate receipt items and totals
-                calculated_subtotal = sum(item['price'] for item in receipt_items.values())
-                if calculated_subtotal != receipt_subtotal:
-                    logging.error(f'Subtotal mismatch: calculated {calculated_subtotal}, expected {receipt_subtotal}')
+                # Utility function used below
+                def extract_info(node, label):
+                    try:
+                        label_tag = node.find(string=lambda text: text and text.startswith(label))
+                        if label_tag:
+                            p_tag = label_tag.find_parent('p')
+                        if p_tag:
+                            next_p = p_tag.find_next('p')
+                            if next_p:
+                                value = next_p.get_text(strip=True)
+                                if value:
+                                    return value.strip()
+                                else:
+                                    logging.error(f'Empty value for {label}')
+                            else:
+                                logging.error(f'No value found for {label}')
+                        else:
+                            logging.error(f'{label} not found in {node}')
+                    except (ValueError, AttributeError) as e:
+                        logging.error(f'Error parsing {label}: {e}')
+                    return ''
 
-                calculated_total = calculated_subtotal + receipt_tax
-                if calculated_total != receipt_total:
-                    logging.error(f'Total mismatch: calculated {calculated_total}, expected {receipt_total}')
+                # Extract Apple ID and Order ID
+                receipt_order_id = extract_info(email_container_div,'Order ID:')
+                receipt_apple_id = extract_info(email_container_div, 'Apple Account:')
+
+                logging.info(f'Apple ID: {receipt_apple_id}')
+                logging.info(f'Order ID: {receipt_order_id}')
+
+                # Extract all the receipt items
+                items_table = email_container_div.find('table')
+                 if items_table:
+                    for row in items_table.find_all('tr'):
+                        cells = row.find_all('td')
+                        if len(cells) >= 3:  # Ensure we have enough cells
+                            item_details = {}
+                            description_cell = cells[1]
+                            paragraphs = description_cell.find_all('p')
+
+                            if len(paragraphs) >= 3:
+                                title = paragraphs[0].get_text(strip=True)
+                                duration = paragraphs[1].get_text(strip=True)
+                                renewal = paragraphs[2].get_text(strip=True)
+
+                                if title == 'Premier':
+                                    title = 'Apple One Premier'
+
+                                if title ==  'Apple TV':
+                                    title = duration
+
+                                item_details['title'] = title
+                                item_details['duration'] = duration
+                                item_details['renewal'] = renewal
+
+                                # Extract price from last cell
+                                item_details['price'] = Money(cells[-1].get_text(strip=True).replace('$', ''), USD)
+
+                                receipt_items[title] = item_details
+                            else:
+                                logging.error('Invalid item format: missing required information')
+                else:
+                    logging.error('Items table not found in email')
+
+                # Extract payment information
+                payment_div = email_container_div.find('div', class_='payment-information')
+                if payment_div:
+                    receipt_subtotal = Money(extract_info(payment_div, 'Subtotal').replace('$', ''), USD)
+                    receipt_tax = Money(extract_info(payment_div, 'Tax').replace('$', ''), USD)
+
+                    # Label for the total changes based on payment method
+                    total_delimiter = payment_div.find('hr')
+                    if total_delimiter:
+                        total_div = total_delimiter.find_next('div')
+                        if total_div:
+                            receipt_total = Money(total_div.get_text(strip=True).replace('$', ''), USD)
+                else:
+                    logging.error('Payment information not found in email')
 
             else:
-                logging.info("No HTML content found in email")
+                logging.info("No recognized email format found")
+
         else:
             logging.error("Failed to extract HTML content from email")
 
@@ -206,6 +279,19 @@ def process_email(mail, email_id):
                 logging.info(f'Single item found: {item_names}')
         else:
             logging.info('No items found in receipt')
+
+        # If there's no tax, Apple doesn't specify a subtotal
+        if receipt_tax == Money(0, USD) and receipt_subtotal == Money(0, USD):
+            receipt_subtotal = receipt_total
+
+        # Validate receipt items and totals
+        calculated_subtotal = sum(item['price'] for item in receipt_items.values())
+        if calculated_subtotal != receipt_subtotal:
+            logging.error(f'Subtotal mismatch: calculated {calculated_subtotal}, expected {receipt_subtotal}')
+
+        calculated_total = calculated_subtotal + receipt_tax
+        if calculated_total != receipt_total:
+            logging.error(f'Total mismatch: calculated {calculated_total}, expected {receipt_total}')
 
         if receipt_order_id and receipt_apple_id and receipt_items and receipt_total and receipt_date and recipient_email:
             return {
