@@ -218,11 +218,10 @@ def process_email(mail, email_id):
 
                 # Extract all the receipt items
                 items_table = email_container_div.find('table')
-                 if items_table:
+                if items_table:
                     for row in items_table.find_all('tr'):
                         cells = row.find_all('td')
                         if len(cells) >= 3:  # Ensure we have enough cells
-                            item_details = {}
                             description_cell = cells[1]
                             paragraphs = description_cell.find_all('p')
 
@@ -234,17 +233,23 @@ def process_email(mail, email_id):
                                 if title == 'Premier':
                                     title = 'Apple One Premier'
 
-                                if title ==  'Apple TV':
+                                if title == 'Apple TV':
                                     title = duration
 
-                                item_details['title'] = title
-                                item_details['duration'] = duration
-                                item_details['renewal'] = renewal
-
                                 # Extract price from last cell
-                                item_details['price'] = Money(cells[-1].get_text(strip=True).replace('$', ''), USD)
+                                price = Money(cells[-1].get_text(strip=True).replace('$', ''), USD)
 
-                                receipt_items[title] = item_details
+                                # Handle loads of money to the account
+                                # Apple does not represent these as negative in the email
+                                if title.startswith("Money added to"):
+                                    price = -price
+
+                                receipt_items[title] = {
+                                    'title': title,
+                                    'duration': duration,
+                                    'renewal': renewal,
+                                    'price': price
+                                }
                             else:
                                 logging.error('Invalid item format: missing required information')
                 else:
@@ -280,12 +285,17 @@ def process_email(mail, email_id):
         else:
             logging.info('No items found in receipt')
 
-        # If there's no tax, Apple doesn't specify a subtotal
-        if receipt_tax == Money(0, USD) and receipt_subtotal == Money(0, USD):
-            receipt_subtotal = receipt_total
-
         # Validate receipt items and totals
         calculated_subtotal = sum(item['price'] for item in receipt_items.values())
+
+        # If there's no tax, Apple doesn't specify a subtotal
+        if receipt_tax == Money(0, USD) and receipt_subtotal == Money(0, USD):
+            receipt_subtotal = calculated_subtotal
+
+        # Apple does not represent loads of money to the account as negative in the email
+        if(calculated_subtotal < Money(0, USD)):
+            receipt_total = -receipt_total
+
         if calculated_subtotal != receipt_subtotal:
             logging.error(f'Subtotal mismatch: calculated {calculated_subtotal}, expected {receipt_subtotal}')
 
