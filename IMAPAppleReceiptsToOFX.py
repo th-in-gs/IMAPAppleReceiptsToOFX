@@ -230,8 +230,14 @@ def process_email(mail, email_id):
                                 duration = paragraphs[1].get_text(strip=True)
                                 renewal = paragraphs[2].get_text(strip=True)
 
+                                # Apple One Premier representation has changed
+                                # over time.
                                 if title == 'Premier':
                                     title = 'Apple One Premier'
+
+                                if title == 'Apple One' and duration == 'Premier (Monthly)':
+                                    title = 'Apple One Premier'
+                                    duration = 'Monthly'
 
                                 if title == 'Apple TV':
                                     title = duration
@@ -261,12 +267,19 @@ def process_email(mail, email_id):
                     receipt_subtotal = Money(extract_info(payment_div, 'Subtotal').replace('$', ''), USD)
                     receipt_tax = Money(extract_info(payment_div, 'Tax').replace('$', ''), USD)
 
-                    # Label for the total changes based on payment method
+                    # Label for the total changes based on payment method.
+                    # If there are multiple payment methods, we need to total
+                    # them up.
                     total_delimiter = payment_div.find('hr')
                     if total_delimiter:
-                        total_div = total_delimiter.find_next('div')
-                        if total_div:
-                            receipt_total = Money(total_div.get_text(strip=True).replace('$', ''), USD)
+                        for total_div in total_delimiter.find_next_siblings('div'):
+                            total_text = total_div.get_text(strip=True)
+                            if re.match(r'^\$\d+\.\d{2}$', total_text):
+                                receipt_total += Money(total_text.replace('$', ''), USD)
+                            else:
+                                logging.error(f'Invalid total format: {total_text}')
+                    else:
+                        logging.error('Total delimiter not found in payment information')
                 else:
                     logging.error('Payment information not found in email')
 
